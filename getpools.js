@@ -11,6 +11,8 @@ const factoryContract = new ethers.Contract(uniswapV2FactoryAddress, uniswapV2Fa
 let poolData = [];
 
 async function processEvent(token0, token1, pairAddress, event) {
+    console.log("PairCreated event detected", event);
+
     token0 = token0.toLowerCase();
     token1 = token1.toLowerCase();
     pairAddress = pairAddress.toLowerCase();
@@ -24,11 +26,18 @@ async function processEvent(token0, token1, pairAddress, event) {
         fee: 3000, // Modify as needed
         createdInBlock: event.blockNumber,
         createdInTx: event.transactionHash.toLowerCase(),
-        index: poolData.length
+        index: poolData.length // Index in the poolData array
     };
 
     poolData.push(poolInfo);
+
+    try {
+        fs.writeFileSync('uniswapPools.json', JSON.stringify(poolData, null, 2));
+    } catch (error) {
+        console.error('Error writing to file:', error);
+    }
 }
+
 
 async function fetchEventsInRange(startBlock, endBlock) {
     const events = await factoryContract.queryFilter(factoryContract.filters.PairCreated(), startBlock, endBlock);
@@ -36,7 +45,7 @@ async function fetchEventsInRange(startBlock, endBlock) {
 }
 
 async function main() {
-    const startBlock = 10000835; // the deployment block of the Uniswap V2 Factory
+    const startBlock = 10000835; // Replace with the deployment block of the Uniswap V2 Factory
     let endBlock = await provider.getBlockNumber();
     const batchSize = 2000; // Set a reasonable batch size
 
@@ -53,8 +62,6 @@ async function main() {
             console.error(`Error fetching events in block range ${currentBlock} to ${batchEndBlock}:`, error);
         }
     }
-
-    fs.writeFileSync('uniswapPools.json', JSON.stringify(poolData, null, 2));
 }
 
 main().catch(console.error);
