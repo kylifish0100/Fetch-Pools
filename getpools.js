@@ -5,63 +5,76 @@ const uniswapV2FactoryAddress = '0x5C69bEe701ef814a2B6a3EDD4B1652CB9cc5aA6f';
 const apiKey = '';
 
 const provider = new ethers.AlchemyProvider("homestead", apiKey);
+const eventSignature = ethers.id('PairCreated(address,address,address,uint256)'); //filter
 
-const factoryContract = new ethers.Contract(uniswapV2FactoryAddress, uniswapV2FactoryABI, provider);
+// const factoryContract = new ethers.Contract(uniswapV2FactoryAddress, uniswapV2FactoryABI, provider);
 
 let poolData = [];
 
-async function processEvent(token0, token1, pairAddress, event) {
-    console.log("PairCreated event detected", event);
+async function processEvent(log) {
+    const decoded = ethers.AbiCoder.defaultAbiCoder().decode(['address', 'uint256'], log.data);
 
-    token0 = token0.toLowerCase();
-    token1 = token1.toLowerCase();
-    pairAddress = pairAddress.toLowerCase();
+    let token0 = log['topics'][1].toLowerCase();
+    let token1 = log['topics'][2].toLowerCase();
+    let pairAddress = decoded[0].toLowerCase();
+    let poolIndex = decoded[1].toString();
 
     let tokens = [token0, token1].sort();
     let poolInfo = {
         address: pairAddress,
         protocol: "Uniswap V2",
         tokens: tokens,
-        factory: uniswapV2FactoryAddress.toLowerCase(),
-        fee: 3000, // Modify as needed
-        createdInBlock: event.blockNumber,
-        createdInTx: event.transactionHash.toLowerCase(),
-        index: poolData.length // Index in the poolData array
+        factory: log.address.toLowerCase(),
+        fee: 3000, // Standard Uniswap V2 fee
+        createdInBlock: log.blockNumber,
+        createdInTx: log.transactionHash.toLowerCase(),
+        index: poolIndex
     };
 
-    poolData.push(poolInfo);
+    poolData.push(poolInfo);    
 
-    try {
-        fs.writeFileSync('uniswapPools.json', JSON.stringify(poolData, null, 2));
-    } catch (error) {
-        console.error('Error writing to file:', error);
-    }
 }
 
-
-async function fetchEventsInRange(startBlock, endBlock) {
-    const events = await factoryContract.queryFilter(factoryContract.filters.PairCreated(), startBlock, endBlock);
-    return events;
-}
-
-async function main() {
-    const startBlock = 10000835; // Replace with the deployment block of the Uniswap V2 Factory
-    let endBlock = await provider.getBlockNumber();
+async function getPairCreatedEvents(startBlock, endBlock) {
     const batchSize = 2000; // Set a reasonable batch size
+    let currentBlock = startBlock;
 
-    for (let currentBlock = startBlock; currentBlock <= endBlock; currentBlock += batchSize) {
+    while (currentBlock < endBlock) {
         const batchEndBlock = Math.min(currentBlock + batchSize, endBlock);
+
         console.log(`Fetching events from block ${currentBlock} to ${batchEndBlock}`);
 
         try {
-            const events = await fetchEventsInRange(currentBlock, batchEndBlock);
-            for (const event of events) {
-                await processEvent(event.args.token0, event.args.token1, event.address, event);
+            const logs = await provider.getLogs({
+                fromBlock: currentBlock,
+                toBlock: batchEndBlock,
+                topics: [eventSignature]
+            });
+
+            for (const log of logs) {
+                // console.log(log);
+                await processEvent(log);
+                
             }
         } catch (error) {
             console.error(`Error fetching events in block range ${currentBlock} to ${batchEndBlock}:`, error);
         }
+        try {
+            // Asynchronously write to the JSON file
+            const json = JSON.stringify(poolData, null, 2);
+            await fs.promises.writeFile('uniswapPools.json', json);
+            console.log('Data written to file');
+        } catch (error) {
+            console.error('Error processing event or writing to file:', error);
+        }
+        currentBlock += batchSize + 1; // Move to the next batch
     }
 }
-
+async function main(){
+    const startBlock = 10000835; // the deployment block of the Uniswap V2 Factory
+    let endBlock = await provider.getBlockNumber();
+    await getPairCreatedEvents(startBlock, endBlock);
+}
 main().catch(console.error);
+
+
