@@ -74,7 +74,7 @@ async function getPairCreatedEvents(startBlock, endBlock) {
         } catch (error) {
             console.error('Error processing event or writing to file:', error);
         }
-        currentBlock += batchEndBlock + 1; // Move to the next batch
+        currentBlock += batchSize + 1; // Move to the next batch
     }
 }
 
