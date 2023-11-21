@@ -74,11 +74,11 @@ async function getPairCreatedEvents(startBlock, endBlock) {
         } catch (error) {
             console.error('Error processing event or writing to file:', error);
         }
-        currentBlock += batchSize + 1; // Move to the next batch
+        currentBlock += batchEndBlock + 1; // Move to the next batch
     }
 }
 
-async function findAllSwapEventsInFirstActiveBlock(pairContractInstance, createBlockTime) {
+async function findAllSwapEvents(pairContractInstance, createBlockTime) {
     const filter = {
         address: pairContractInstance.address,
         topics: [
@@ -95,21 +95,21 @@ async function findAllSwapEventsInFirstActiveBlock(pairContractInstance, createB
     const firstSwapBlockNumber = logs[0].blockNumber;
 
     // Filter and return all swap events in the first active block
-    return logs.filter(log => log.blockNumber === firstSwapBlockNumber);
+    // return logs.filter(log => log.blockNumber === firstSwapBlockNumber);
+    return logs;
 }
-
 
 
 async function getReservesAroundSwap(pairContract, swapBlockNumber) {
     // Get the reserves before the swap
     const reservesBefore = await pairContract.getReserves({ blockTag: swapBlockNumber - 1 });
     
-    console.log(`Reserves before the swap: reserve0: ${reservesBefore.reserve0.toString()}, reserve1: ${reservesBefore.reserve1.toString()}`);
+    // console.log(`Reserves before the swap: reserve0: ${reservesBefore.reserve0.toString()}, reserve1: ${reservesBefore.reserve1.toString()}`);
     
     // Get the reserves after the swap
     const reservesAfter = await pairContract.getReserves({ blockTag: swapBlockNumber });
     
-    console.log(`Reserves after the swap: reserve0: ${reservesAfter.reserve0.toString()}, reserve1: ${reservesAfter.reserve1.toString()}`);
+    // console.log(`Reserves after the swap: reserve0: ${reservesAfter.reserve0.toString()}, reserve1: ${reservesAfter.reserve1.toString()}`);
   
     return {
       before: reservesBefore,
@@ -117,85 +117,129 @@ async function getReservesAroundSwap(pairContract, swapBlockNumber) {
     };
 }
 
-async function calculateCommission(pairContractInstance, swapEventLogs) {
-    const swapBlockNumber = swapEventLogs[0].blockNumber;
-    // console.log(swapEventLogs);
+async function fetchReservesForEvent(pairContractInstance, swapBlockNumber) {
+    try {
+        const reserves = await getReservesAroundSwap(pairContractInstance, swapBlockNumber);
+        return reserves;
+    } catch (error) {
+        console.error(`Error fetching reserves for block number ${swapBlockNumber}:`, error);
+        return null;  // Return null to indicate failure
+    }
+}
+
+async function calculateCommission(pairContractInstance, swapEventLog) {
+    const swapBlockNumber = swapEventLog.blockNumber;
+     // Get reserves around the swap
+     const reserves = await getReservesAroundSwap(pairContractInstance, swapBlockNumber);
+     const reserve0Before = reserves.before.reserve0;
+     const reserve0After = reserves.after.reserve0;
+     const reserve1Before = reserves.before.reserve1;
+     const reserve1After = reserves.after.reserve1;
+     let x = reserve0Before<reserve0After?reserve0Before:reserve1Before;
+     let y = reserve1Before>reserve1After?reserve1Before:reserve0Before;
+     if(reserve0Before == reserve0After){
+        return 0;
+     }
+    // console.log(swapEventLog);
     tokenInFlow = [];
     tokenOutFlow = [];
     let dx, dy;
     // Decode the swap event log to get amounts in and out
-    for (log of swapEventLogs) {
-        const decodedLog = ethers.AbiCoder.defaultAbiCoder().decode(
-            ['uint256', 'uint256', 'uint256', 'uint256'],
-            log.data
-        );
+    const decodedLog = ethers.AbiCoder.defaultAbiCoder().decode(
+        ['uint256', 'uint256', 'uint256', 'uint256'],
+        swapEventLog.data
+    );
 
-        const amount0In = decodedLog[0];
-        const amount1In = decodedLog[1];
-        const amount0Out = decodedLog[2];
-        const amount1Out = decodedLog[3];
+    const amount0In = decodedLog[0];
+    const amount1In = decodedLog[1];
+    const amount0Out = decodedLog[2];
+    const amount1Out = decodedLog[3];
 
-        
-        if (!amount0In === 0) {
-            dx = amount0In;
-            dy = amount1Out;
-        } else {
-            dx = amount1In;
-            dy = amount0Out;
-        }
-
+    
+    if (!amount0In === 0) {
+        dx = amount0In;
+        dy = amount1Out;
+    } else {
+        dx = amount1In;
+        dy = amount0Out;
     }
+    
+    // Calculate commission
+    // console.log(dx, dy, x, y, reserve0After, reserve1After)
+    const scaleFactor = 10n ** 6n; // Scaling to six decimal places for intermediate calculation
+    // Calculate the commission scaled up for precision
+    const commissionScaled = (x * dy * scaleFactor) / ((y - dy) * dx);
+    // Convert the scaled commission to a number for rounding
+    let commissionDecimal = 1 - (Number(commissionScaled) / 10 ** 6); // Scaling down after conversion
+    // Round to 3 decimal places
+    commissionDecimal = Math.round(commissionDecimal * 1000) / 1000;
 
-        // Get reserves around the swap
-        const reserves = await getReservesAroundSwap(pairContractInstance, swapBlockNumber);
-        const reserve0Before = reserves.before.reserve0;
-        const reserve0After = reserves.after.reserve0;
-        const reserve1Before = reserves.before.reserve1;
-        const reserve1After = reserves.after.reserve1;
-        let x = reserve0Before<reserve0After?reserve0Before:reserve1Before;
-        let y = reserve1Before>reserve1After?reserve1Before:reserve0Before;
-       
-        // Calculate commission
-        // console.log(dx, dy, x, y, reserve0After, reserve1After)
-        const scaleFactor = 10n ** 6n; // Scaling to six decimal places for intermediate calculation
-        // Calculate the commission scaled up for precision
-        const commissionScaled = (x * dy * scaleFactor) / ((y - dy) * dx);
-        // Convert the scaled commission to a number for rounding
-        let commissionDecimal = 1 - (Number(commissionScaled) / 10 ** 6); // Scaling down after conversion
-        // Round to 3 decimal places
-        commissionDecimal = Math.round(commissionDecimal * 1000) / 1000;
-
-        // console.log(commissionDecimal);
+    // console.log(commissionDecimal);
 
     return commissionDecimal*1000000;
 }
 
+function findPoolWithSmallestBlock(poolData, factoryAddress) {
+    let smallestBlockPool = null;
+
+    poolData.forEach(pool => {
+        // Check if the current pool matches the required factory address
+        if (pool.factory === factoryAddress) {
+            // If smallestBlockPool is not set or current pool has a smaller createdInBlock value
+            if (!smallestBlockPool || pool.createdInBlock < smallestBlockPool.createdInBlock) {
+                smallestBlockPool = pool;
+            }
+        }
+    });
+
+    return smallestBlockPool;
+}
+
 async function processPools(poolData) {
-    let protocols = new Set();
+    let factories = new Set();
     let commissionResults = {};
   
-    // Identify unique protocols
+    // Identify unique factory addresses under Uniswap V2 protocol
     poolData.forEach(pool => {
-      protocols.add(pool.protocol);
-    });
-  
-    // Calculate commission for the first pool of each protocol
-    for (let protocol of protocols) {
-        const firstPool = poolData.find(p => p.protocol === protocol);
-        if (firstPool) {
-        const pairContractInstance = new ethers.Contract(firstPool.address, pairAbi, provider);
-        const SwapEventLogs = await findAllSwapEventsInFirstActiveBlock(pairContractInstance, firstPool.createdInBlock);
-        if (!SwapEventLogs) {
-            console.log('No swap event found for this pool')} // No swap events found for this pool
-        const commissionPercentage = await calculateCommission(pairContractInstance, SwapEventLogs);
-        commissionResults[protocol] = commissionPercentage;
+        if (pool.protocol === "Uniswap V2" && pool.factory) {
+            factories.add(pool.factory);
         }
-        // Update all entries with the same protocol in poolData
-        poolData.forEach(pool => {
-            if (pool.protocol === protocol) {
-                pool.fee = commissionPercentage;
+    });
+    // console.log(factories);
+    // Calculate commission for the first pool of each factory
+    for (let factory of factories) {
+        let commissionPercentage;  // Declare outside the loop
+        const firstPool = findPoolWithSmallestBlock(poolData, factory);
+        console.log(firstPool.address, firstPool.createdInBlock);
+        if (firstPool) {
+
+            const pairContractInstance = new ethers.Contract(firstPool.address, pairAbi, provider);
+            const SwapEventLogs = await findAllSwapEvents(pairContractInstance, firstPool.createdInBlock);
+
+            if (!SwapEventLogs || SwapEventLogs.length === 0) {
+                console.log(`No swap events found for pool at ${pool.address}`);
+                continue;
             }
-        });
+
+            for (const swapEventLog of SwapEventLogs) {
+                const swapBlockNumber = swapEventLog.blockNumber;
+                const reserves = await fetchReservesForEvent(pairContractInstance, swapBlockNumber);
+                if (reserves) {
+                    console.log('successfully fetched Reserves before and after a swap', reserves);
+                    commissionPercentage = await calculateCommission(pairContractInstance, swapEventLog);
+                    commissionResults[factory] = commissionPercentage;
+                    console.log(`Factory: ${factory} Commission: ${commissionPercentage}`);
+                    break; // if calculate commission for the first valid event success then break
+                }
+            }
+        }
+        
+        // Update all entries with the same factory in poolData
+        // poolData.forEach(pool => {
+        //     if (pool.factory === factory) {
+        //         pool.fee = commissionPercentage;
+        //     }
+        // });
     }
 
     return commissionResults;
@@ -228,6 +272,7 @@ async function main(){
     .catch(error => console.error(error));
     
 }
+testCalCommission('./pools.json');
 // testCalCommission('./uniswapPools.json');
-main().catch(error => console.error(error));
+// main().catch(error => console.error(error));
 
